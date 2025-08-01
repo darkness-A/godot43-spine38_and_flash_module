@@ -272,6 +272,7 @@ Ref<FlashDocument> FlashDocument::from_file(const String &p_path) {
 Vector2 FlashDocument::get_atlas_size() const {
     return atlas.is_valid() ? Vector2(atlas->get_width(), atlas->get_height()) : Vector2();
 }
+
 Error FlashDocument::load_file(const String &p_path) {
     Ref<XMLParser> xml; xml.instantiate();
     Error err = xml->open(p_path);
@@ -282,6 +283,27 @@ Error FlashDocument::load_file(const String &p_path) {
     document_path = p_path.get_base_dir();
     err = parse(xml);
     ERR_FAIL_COND_V_MSG(err != Error::OK, err, "Can't parse " + p_path);
+    
+    // 如果atlas未设置，尝试从导入的资源中加载
+    if (!atlas.is_valid()) {
+        // 查找关联的纹理图集文件
+        String atlas_path = p_path.get_basename() + ".ctexarray";
+        if (FileAccess::exists(atlas_path)) {
+            atlas = ResourceLoader::load(atlas_path, "Texture2DArray");
+        } else {
+            // 尝试查找其他可能的纹理图集文件
+            String base_path = p_path.get_basename();
+            String extensions[] = {".s3tc.ctexarray", ".etc2.ctexarray", ".bptc.ctexarray", ".astc.ctexarray"};
+            for (int i = 0; i < 4; i++) {
+                String path = base_path + extensions[i];
+                if (FileAccess::exists(path)) {
+                    atlas = ResourceLoader::load(path, "Texture2DArray");
+                    break;
+                }
+            }
+        }
+    }
+    
     return OK;
 }
 
@@ -306,55 +328,64 @@ void FlashDocument::parse_timeline(const String &path) {
 }
 
 void FlashDocument::setup(FlashDocument *p_document, FlashElement *p_parent) {
-    document = this;
-    parent = NULL;
+    document = p_document;
+    parent = p_parent;
 
     Array symbols_array = symbols.values();
     for (int i=0; i<symbols_array.size(); i++) {
         Ref<FlashTimeline> timeline = symbols_array[i];
         if (timeline.is_valid())
-            timeline->setup(this, this);
+            timeline->setup(p_document, this);
     }
 
     Array bitmaps_array = bitmaps.values();
     for (int i=0; i<bitmaps_array.size(); i++) {
         Ref<FlashBitmapItem> bi = bitmaps_array[i];
         if (bi.is_valid())
-            bi->setup(this, this);
+            bi->setup(p_document, this);
     }
 
     for (List<Ref<FlashTimeline>>::Element *E = timelines.front(); E; E = E->next()) {
-        E->get()->setup(this, this);
+        E->get()->setup(p_document, this);
     }
 
     cache_variants();
 }
 Ref<FlashTextureRect> FlashDocument::get_bitmap_rect(const String &p_name) {
     if (!bitmaps.has(p_name)) {
-        print_line("Invalid image: No bitmap found for " + p_name + ". Available bitmaps: " + String::num(bitmaps.size()));
-        // Print first few bitmap names for debugging
-        int count = 0;
-        Array keys = bitmaps.keys();
-        for (int i = 0; i < keys.size(); i++) {
-            String key = keys[i];
-            print_line("  - " + key);
-            count++;
-            if (count >= 5) {
-                print_line("  ... and " + String::num(bitmaps.size() - 5) + " more");
-                break;
+        // 只在调试模式下打印此消息，避免在正常播放时产生大量日志
+        if (OS::get_singleton()->is_stdout_verbose()) {
+            print_line("调试信息: 找不到位图 " + p_name + "。可用位图数量: " + String::num(bitmaps.size()));
+            // 只在调试模式下且位图数量较少时打印位图名称
+            if (bitmaps.size() <= 5) {
+                int count = 0;
+                Array keys = bitmaps.keys();
+                for (int i = 0; i < keys.size(); i++) {
+                    String key = keys[i];
+                    print_line("  - " + key);
+                    count++;
+                }
+            } else if (bitmaps.size() > 0) {
+                print_line("  (使用详细日志模式查看所有位图名称)");
             }
         }
         return Ref<FlashTextureRect>();
     }
+    
     Ref<FlashBitmapItem> item = bitmaps[p_name];
     if (item.is_null()) {
-        print_line("Invalid image: Bitmap item is null for " + p_name);
+        // 这种情况不应该发生，因为我们已经检查了bitmaps.has(p_name)
+        if (OS::get_singleton()->is_stdout_verbose()) {
+            print_line("调试信息: 位图项为空 " + p_name);
+        }
         return Ref<FlashTextureRect>();
     }
+    
     Ref<FlashTextureRect> texture = item->get_texture();
-    if (texture.is_null()) {
-        print_line("Invalid image: Texture is null for bitmap item " + p_name);
+    if (texture.is_null() && OS::get_singleton()->is_stdout_verbose()) {
+        print_line("调试信息: 位图项 " + p_name + " 的纹理为空");
     }
+    
     return texture;
 }
 Ref<FlashTimeline> FlashDocument::get_main_timeline() {
@@ -1040,12 +1071,16 @@ Error FlashBitmapInstance::parse(Ref<XMLParser> xml) {
 Ref<FlashTextureRect> FlashBitmapInstance::get_texture() {
     if (texture.is_null()) {
         if (!document) {
-            print_line("Invalid image: Document is null for bitmap " + library_item_name);
+            // 这是一个预期的情况，当FlashPlayer初始化但尚未设置资源时
+            // 不打印错误，只是返回空引用
             return Ref<FlashTextureRect>();
         }
         texture = document->get_bitmap_rect(library_item_name);
         if (texture.is_null()) {
-            print_line("Invalid image: Failed to get texture rect for bitmap " + library_item_name);
+            // 只在调试模式下打印此消息，避免在正常播放时产生大量日志
+            if (OS::get_singleton()->is_stdout_verbose()) {
+                print_line("调试信息: 无法获取位图 " + library_item_name + " 的纹理矩形");
+            }
         }
     }
     return texture;
@@ -1054,9 +1089,19 @@ Ref<FlashTextureRect> FlashBitmapInstance::get_texture() {
 void FlashBitmapInstance::animation_process(FlashPlayer* node, float time, float delta, Transform2D tr, FlashColorEffect effect) {
     Ref<FlashTextureRect> tex = get_texture();
     if (!tex.is_valid()) {
-        print_line("Invalid image: Texture is not valid for bitmap " + library_item_name);
+        // 只在调试模式下打印此消息，避免在正常播放时产生大量日志
+        if (OS::get_singleton()->is_stdout_verbose()) {
+            print_line("调试信息: 位图 " + library_item_name + " 的纹理无效，跳过渲染");
+        }
         return;
     }
+    
+    // 检查纹理图集是否有效
+    if (!document || !document->get_atlas().is_valid()) {
+        // 纹理图集无效，但这可能是预期的情况（例如，在设置资源之前）
+        return;
+    }
+    
     if (node->is_masking()) {
         Transform2D scale;
         scale.scale(tex->get_original_size()/tex->get_region().size);
@@ -1100,6 +1145,14 @@ void FlashBitmapInstance::animation_process(FlashPlayer* node, float time, float
 
     if (uvs.size()  == 0) {
         Vector2 as = document->get_atlas_size();
+        if (as.x <= 0 || as.y <= 0) {
+            // 纹理图集大小无效，可能是纹理图集未正确加载
+            if (OS::get_singleton()->is_stdout_verbose()) {
+                print_line("调试信息: 纹理图集大小无效 (" + String::num_real(as.x) + "," + String::num_real(as.y) + ")");
+            }
+            return;
+        }
+        
         Rect2 r = tex->get_region();
         Vector2 start = r.position / as;
         Vector2 end = (r.position + r.size) / as;
@@ -1367,47 +1420,48 @@ void FlashTextureRect::_bind_methods() {
     ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "original_size"), "set_original_size", "get_original_size");
 }
 
-Ref<Resource> ResourceFormatLoaderFlashTexture::load(const String &p_path, const String &p_original_path, Error *r_error) {
-	Ref<FileAccess> f = FileAccess::open_compressed(p_path, FileAccess::READ);
-    // int decompressed_size = f->get_32();
-    // int bytes;
-    // PackedVector<uint8_t> buff;
-    // buff.resize(f->get_len()-f->get_position());
-    // {
-    //     PoolVector<uint8_t>::Write w = buff.write();
-    //     bytes = f->get_buffer(w.ptr(), buff.size());
-    // }
 
-    // Vector<uint8_t> decompressed = f->get_var;
-    // decompressed.resize(decompressed_size);
-    // Compression::decompress(decompressed.write().ptr(), decompressed.size(), buff.read().ptr(), bytes, Compression::MODE_FASTLZ);
 
-    // PoolVector<uint8_t>::Read r = decompressed.read();
-    // Variant texture_info_var;
-    // decode_variant(texture_info_var, r.ptr(), decompressed.size(), NULL, true);
-    Dictionary texture_info = f->get_var();
-    Array images = texture_info["images"];
-    Ref<Texture2DArray> texture;
-    texture.instantiate();
-    // texture-> create((int)texture_info["width"], (int)texture_info["height"], images.size(), (Image::Format)(int)texture_info["format"], (int)texture_info["flags"]);
-    Vector<Ref<Image>> textures;
-    for (int i=0; i<images.size(); i++){
-        Ref<Image> img = images[i];
-        textures.push_back(img);
-        // texture->set_layer_data(img, i);
+
+// ResourceFormatLoaderFlashDocument 实现
+Ref<Resource> ResourceFormatLoaderFlashDocument::load(const String &p_path, const String &p_original_path, Error *r_error, bool p_use_sub_threads, float *r_progress, CacheMode p_cache_mode) {
+    // 检查是否是已保存的资源文件（.tres或.res）
+    if (p_path.ends_with(".tres") || p_path.ends_with(".res")) {
+        // 对于已保存的资源，使用默认加载器
+        return Ref<Resource>();
     }
-    texture->create_from_images(textures);
-    return texture;
+
+    // 对于.zfl文件，创建新的FlashDocument
+    Ref<FlashDocument> doc;
+    doc.instantiate();
+
+    Error err = doc->load_file(p_path);
+    if (r_error) {
+        *r_error = err;
+    }
+
+    if (err != OK) {
+        return Ref<Resource>();
+    }
+
+    // 确保文档已正确初始化
+    doc->setup(doc.ptr(), nullptr);
+
+    return doc;
 }
 
-void ResourceFormatLoaderFlashTexture::get_recognized_extensions(List<String> *p_extensions) const {
-	p_extensions->push_back("ftex");
+void ResourceFormatLoaderFlashDocument::get_recognized_extensions(List<String> *p_extensions) const {
+    p_extensions->push_back("zfl");
 }
-bool ResourceFormatLoaderFlashTexture::handles_type(const String &p_type) const {
-	return p_type == "TextureArray";
+
+bool ResourceFormatLoaderFlashDocument::handles_type(const String &p_type) const {
+    return p_type == "FlashDocument";
 }
-String ResourceFormatLoaderFlashTexture::get_resource_type(const String &p_path) const {
-	if (p_path.get_extension().to_lower() == "ftex")
-		return "TextureArray";
-	return "";
+
+String ResourceFormatLoaderFlashDocument::get_resource_type(const String &p_path) const {
+    String extension = p_path.get_extension().to_lower();
+    if (extension == "zfl") {
+        return "FlashDocument";
+    }
+    return "";
 }

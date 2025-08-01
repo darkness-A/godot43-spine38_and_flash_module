@@ -30,6 +30,9 @@
 #include "animation_node_flash.h"
 #endif
 
+// 声明资源加载器变量
+static Ref<ResourceFormatLoaderFlashDocument> resource_loader_flash_document;
+
 #ifdef TOOLS_ENABLED
 #include "core/config/engine.h"
 #include "editor/export/editor_export.h"
@@ -37,73 +40,61 @@
 #include "resource_importer_flash.h"
 
 class EditorExportFlash : public EditorExportPlugin {
+    GDCLASS(EditorExportFlash, EditorExportPlugin);
 
-	GDCLASS(EditorExportFlash, EditorExportPlugin);
-	bool export_processed;
+protected:
+    static void _bind_methods() {}
 
 public:
-	virtual void _export_begin(const HashSet<String> &p_features, bool p_debug, const String &p_path, int p_flags) {
-		export_processed = false;
-	}
-	
-	virtual String get_name() const {
-		return "Flash";
-	}
+    virtual String get_name() const override {
+        return "Flash";
+    }
 
-	virtual void _export_file(const String &p_path, const String &p_type, const HashSet<String> &p_features) {
-		if (p_type != "FlashDocument") return;
-		Ref<ConfigFile> config;
-		config.instantiate();
-		Error err = config->load(p_path + ".import");
-		if (err != OK) return;
-
-		List<String> remaps;
-		config->get_section_keys("remap", &remaps);
-
-		HashSet<String> remap_features;
-
-		for (List<String>::Element *F = remaps.front(); F; F = F->next()) {
-
-			String remap = F->get();
-			String feature = remap.get_slice(".", 1);
-			if (p_features.has(feature)) {
-				remap_features.insert(feature);
-			}
-		}
-		String imported_doc_path;
-		for (List<String>::Element *F = remaps.front(); F; F = F->next()) {
-			String remap = F->get();
-			if (remap == "path") {
-				String imported_doc_path = config->get_value("remap", remap);
-				String texture_path = imported_doc_path.substr(0, imported_doc_path.length()-3) + "ctexarray";
-				add_file(texture_path, FileAccess::get_file_as_bytes(texture_path), false);
-			} else if (remap.begins_with("path.")) {
-				String feature = remap.get_slice(".", 1);
-				if (remap_features.has(feature)) {
-					String imported_doc_path = config->get_value("remap", remap);
-					String texture_path = imported_doc_path.substr(0, imported_doc_path.length()-3) + "ctexarray";
-					add_file(texture_path, FileAccess::get_file_as_bytes(texture_path), false);
-				}
-			}
-		}
-	}
+    virtual void _export_file(const String &p_path, const String &p_type, const HashSet<String> &p_features) override {
+        // 导出Flash相关文件
+        if (p_type == "FlashDocument") {
+            // 添加.zfl文件到导出列表
+            add_file(p_path, FileAccess::get_file_as_bytes(p_path), false);
+            
+            // 同时导出关联的纹理图集文件
+            String base_path = p_path.get_basename();
+            String extensions[] = {".ctexarray", ".s3tc.ctexarray", ".etc2.ctexarray", ".bptc.ctexarray", ".astc.ctexarray"};
+            
+            for (int i = 0; i < 5; i++) {
+                String atlas_path = base_path + extensions[i];
+                if (FileAccess::exists(atlas_path)) {
+                    add_file(atlas_path, FileAccess::get_file_as_bytes(atlas_path), false);
+                }
+            }
+        }
+    }
 };
 
-static void _editor_init() {
-	Ref<ResourceImporterFlash> flash_import;
-	flash_import.instantiate();
-	ResourceFormatImporter::get_singleton()->add_importer(flash_import);
+static Ref<EditorExportFlash> editor_export_flash;
 
-	Ref<EditorExportFlash> flash_export;
-	flash_export.instantiate();
-	EditorExport::get_singleton()->add_export_plugin(flash_export);
+void _editor_init() {
+    // 注册资源导入器
+    Ref<ResourceImporterFlash> flash_importer;
+    flash_importer.instantiate();
+    ResourceFormatImporter::get_singleton()->add_importer(flash_importer);
+
+    // 注册导出插件
+    editor_export_flash.instantiate();
+    EditorExport::get_singleton()->add_export_plugin(editor_export_flash);
 }
 #endif
 
-
-// Ref<ResourceFormatLoaderFlashTexture> resource_loader_flash_texture;
-
 void initialize_flash_module(ModuleInitializationLevel p_level) {
+#ifdef TOOLS_ENABLED
+    if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
+        EditorNode::add_init_callback(_editor_init);
+        return;
+    }
+#endif
+
+    if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
+        return;
+    }
 	// core flash classes
 	ClassDB::register_class<FlashPlayer>();
 #ifdef MODULE_FLASH_WITH_ANIMATION_NODES
@@ -126,7 +117,9 @@ void initialize_flash_module(ModuleInitializationLevel p_level) {
 	ClassDB::register_class<FlashBitmapInstance>();
 	ClassDB::register_class<FlashTween>();
 
-
+// 创建并注册资源加载器
+    resource_loader_flash_document.instantiate();
+    ResourceLoader::add_resource_format_loader(resource_loader_flash_document);
 	// loader
 	// resource_loader_flash_texture.instantiate();
 	// ResourceLoader::add_resource_format_loader(resource_loader_flash_texture);
@@ -137,6 +130,15 @@ void initialize_flash_module(ModuleInitializationLevel p_level) {
 }
 
 void uninitialize_flash_module(ModuleInitializationLevel p_level) {
+if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
+        return;
+    }
+
+    // 移除资源加载器
+    if (resource_loader_flash_document.is_valid()) {
+        ResourceLoader::remove_resource_format_loader(resource_loader_flash_document);
+        resource_loader_flash_document.unref();
+    }
 	// ResourceLoader::remove_resource_format_loader(resource_loader_flash_texture);
 	// resource_loader_flash_texture.unref();
 }

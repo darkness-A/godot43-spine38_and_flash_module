@@ -34,13 +34,56 @@ void FlashPlayer::_notification(int p_what) {
     switch (p_what) {
         case NOTIFICATION_ENTER_TREE : {
             if (!resource.is_valid() || !resource->get_atlas().is_valid()) {
-                print_line("invalid flash atlas");
+                if (!resource.is_valid()) {
+                    print_line("Warning: FlashDocument resource not set - please set it later");
+                } else if (!resource->get_atlas().is_valid()) {
+                    print_line("Warning: Invalid texture atlas");
+                    String doc_path = resource->get_document_path();
+                    print_line(String("Document path: " + doc_path));
+                    if (!doc_path.is_empty()) {
+                        // Attempting to load associated texture atlas
+                        String base_path = doc_path.get_basename();
+                        String extensions[] = {".ctexarray", ".s3tc.ctexarray", ".etc2.ctexarray", ".bptc.ctexarray", ".astc.ctexarray"};
+                        bool atlas_loaded = false;
+                        
+                        for (int i = 0; i < 5; i++) {
+                            String path = base_path + extensions[i];
+                            if (FileAccess::exists(path)) {
+                                Ref<Texture2DArray> atlas = ResourceLoader::load(path, "Texture2DArray");
+                                if (atlas.is_valid()) {
+                                    resource->set_atlas(atlas);
+                                    atlas_loaded = true;
+                                    print_line(String("uccessfully loaded atlas from path: " + path));
+                                    break;
+                                } else {
+                                    print_line(String("Warning: Atlas file exists but failed to load: " + path));
+                                }
+                            }
+                        }
+                        
+                        if (!atlas_loaded) {
+                            print_line(String("Looking for atlas files:"));
+                            for (int i = 0; i < 5; i++) {
+                                String path = base_path + extensions[i];
+                                print_line(String("  " + path + ": " + (FileAccess::exists(path) ? "exists" : "not found")));
+                            }
+                        }
+                    } else {
+                        print_line(String("Document path is empty - resource may not be loaded properly"));
+                    }
+                }
                 return;
             }
             if (!clipping_texture.is_valid()) {
                 clipping_texture.instantiate();
                 clipping_data.instantiate();
-                clipping_data->initialize_data(32, 32, false, Image::FORMAT_RGBAH);
+                clipping_data->initialize_data(32, 32, false, Image::FORMAT_RGBA8);
+                // 验证Image数据有效性
+                if (clipping_data->is_empty()) {
+                    print_line(String("ERROR: Clipping data is empty after initialization"));
+                    return;
+                }
+
                 clipping_texture->create_from_image(clipping_data);
                 RS::get_singleton()->material_set_param(flash_material, "CLIPPING_TEXTURE", clipping_texture->get_rid());
             }
@@ -361,7 +404,42 @@ void FlashPlayer::set_resource(const Ref<FlashDocument> &doc) {
     frame_overrides.clear();
     active_variants.clear();
     if (!resource.is_valid() || !resource->get_atlas().is_valid()) {
-        print_line("invalid flash atlas");
+        if (!resource.is_valid()) {
+            print_line(String("invalid flash atlas: FlashDocument resource is not valid"));
+        } else if (!resource->get_atlas().is_valid()) {
+            print_line(String("invalid flash atlas: Texture atlas is not valid"));
+            String doc_path = resource->get_document_path();
+            print_line(String("Document path: " + doc_path));
+            if (!doc_path.is_empty()) {
+                // 尝试加载关联的纹理图集
+                String base_path = doc_path.get_basename();
+                String extensions[] = {".ctexarray", ".s3tc.ctexarray", ".etc2.ctexarray", ".bptc.ctexarray", ".astc.ctexarray"};
+                bool atlas_loaded = false;
+                
+                for (int i = 0; i < 5; i++) {
+                    String path = base_path + extensions[i];
+                    if (FileAccess::exists(path)) {
+                        Ref<Texture2DArray> atlas = ResourceLoader::load(path, "Texture2DArray");
+                        if (atlas.is_valid()) {
+                            resource->set_atlas(atlas);
+                            atlas_loaded = true;
+                            print_line(String("Successfully loaded atlas from: " + path));
+                            break;
+                        }
+                    }
+                }
+                
+                if (!atlas_loaded) {
+                    print_line(String("Looking for atlas at paths:"));
+                    for (int i = 0; i < 5; i++) {
+                        String path = base_path + extensions[i];
+                        print_line(String("  " + path + ": " + (FileAccess::exists(path) ? "exists" : "not found")));
+                    }
+                }
+            } else {
+                print_line(String("Document path is empty - resource may not be loaded properly"));
+            }
+        }
         return;
     }
     if (resource.is_valid()) {
@@ -724,8 +802,33 @@ void FlashPlayer::queue_animation_event(const String &p_event, bool p_reversed) 
     }
 }
 
+void FlashPlayer::ensure_clipping_data_valid() {
+    if (!clipping_texture.is_valid()) {
+        //print_line(String("Reinitializing clipping_texture"));
+        clipping_texture.instantiate();
+    }
+
+    if (!clipping_data.is_valid() || clipping_data->is_empty()) {
+        //print_line(String("Reinitializing clipping_data..."));
+        clipping_data.instantiate();
+        clipping_data->initialize_data(32, 32, false, Image::FORMAT_RGBA8);
+        if (clipping_data->is_empty()) {
+            print_line(String("ERROR: Failed to reinitialize clipping_data"));
+            return;
+        }
+        
+        if (clipping_texture.is_valid()) {
+            clipping_texture->create_from_image(clipping_data);
+        } else {
+            print_line(String("ERROR: clipping_texture is invalid, cannot create texture"));
+        }
+    }
+}
+
 void FlashPlayer::update_clipping_data() {
-    // clipping_data->lock();
+    // 确保clipping_data有效
+    ensure_clipping_data_valid();
+    
     Vector2i pos = Vector2i(0, 0);
     Transform2D scale_transform;
     //scale_transform.scale(Vector2(2.0, 2.0));
@@ -752,8 +855,11 @@ void FlashPlayer::update_clipping_data() {
             if (pos.y >= 32) break;
         }
     }
-    // clipping_data->unlock();
-    clipping_texture->set_image(clipping_data);
+    
+    // 检查图像数据是否有效，避免设置无效图像
+    if (clipping_data.is_valid() && !clipping_data->is_empty()) {
+        clipping_texture->set_image(clipping_data);
+    }
 }
 
 void FlashPlayer::mask_begin(int mask_id) {
